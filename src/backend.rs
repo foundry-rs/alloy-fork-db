@@ -26,11 +26,9 @@ use std::{
     marker::PhantomData,
     path::Path,
     pin::Pin,
-    sync::{
-        mpsc::{channel as oneshot_channel, Sender as OneshotSender},
-        Arc,
-    },
+    sync::Arc,
 };
+use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
 /// Logged when an error is indicative that the user is trying to fork from a non-archive node.
 pub const NON_ARCHIVE_NODE_WARNING: &str = "\
@@ -52,11 +50,11 @@ type TransactionFuture<Err> = Pin<
     >,
 >;
 
-type AccountInfoSender = OneshotSender<DatabaseResult<AccountInfo>>;
-type StorageSender = OneshotSender<DatabaseResult<U256>>;
-type BlockHashSender = OneshotSender<DatabaseResult<B256>>;
-type FullBlockSender = OneshotSender<DatabaseResult<Block>>;
-type TransactionSender = OneshotSender<DatabaseResult<WithOtherFields<Transaction>>>;
+type AccountInfoSender = UnboundedSender<DatabaseResult<AccountInfo>>;
+type StorageSender = UnboundedSender<DatabaseResult<U256>>;
+type BlockHashSender = UnboundedSender<DatabaseResult<B256>>;
+type FullBlockSender = UnboundedSender<DatabaseResult<Block>>;
+type TransactionSender = UnboundedSender<DatabaseResult<WithOtherFields<Transaction>>>;
 
 type AddressData = Map<Address, AccountInfo>;
 type StorageData = Map<Address, StorageInfo>;
@@ -666,47 +664,76 @@ impl SharedBackend {
     /// Returns the full block for the given block identifier
     pub fn get_full_block(&self, block: impl Into<BlockId>) -> DatabaseResult<Block> {
         self.blocking_mode.run(|| {
-            let (sender, rx) = oneshot_channel();
-            let req = BackendRequest::FullBlock(block.into(), sender);
+            let (sender, mut rx) = unbounded_channel();
+            let block_id = block.into();
+            let req = BackendRequest::FullBlock(block_id, sender);
             self.backend.clone().try_send(req)?;
-            rx.recv()?
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(async move { rx.recv().await })
+                .unwrap_or(Err(DatabaseError::GetFullBlock(
+                    block_id,
+                    eyre::eyre!("receiver dropped").into(),
+                )))
         })
     }
 
     /// Returns the transaction for the hash
     pub fn get_transaction(&self, tx: B256) -> DatabaseResult<WithOtherFields<Transaction>> {
         self.blocking_mode.run(|| {
-            let (sender, rx) = oneshot_channel();
+            let (sender, mut rx) = unbounded_channel();
             let req = BackendRequest::Transaction(tx, sender);
             self.backend.clone().try_send(req)?;
-            rx.recv()?
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(async move { rx.recv().await })
+                .unwrap_or(Err(DatabaseError::GetTransaction(
+                    tx,
+                    eyre::eyre!("receiver dropped").into(),
+                )))
         })
     }
 
     fn do_get_basic(&self, address: Address) -> DatabaseResult<Option<AccountInfo>> {
         self.blocking_mode.run(|| {
-            let (sender, rx) = oneshot_channel();
+            let (sender, mut rx) = unbounded_channel();
             let req = BackendRequest::Basic(address, sender);
             self.backend.clone().try_send(req)?;
-            rx.recv()?.map(Some)
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(async move { rx.recv().await })
+                .map_or(Ok(None), |v| v.map(Some))
         })
     }
 
     fn do_get_storage(&self, address: Address, index: U256) -> DatabaseResult<U256> {
         self.blocking_mode.run(|| {
-            let (sender, rx) = oneshot_channel();
+            let (sender, mut rx) = unbounded_channel();
             let req = BackendRequest::Storage(address, index, sender);
             self.backend.clone().try_send(req)?;
-            rx.recv()?
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(async move { rx.recv().await })
+                .unwrap_or(Err(DatabaseError::GetStorage(
+                    address,
+                    index,
+                    eyre::eyre!("receiver dropped").into(),
+                )))
         })
     }
 
     fn do_get_block_hash(&self, number: u64) -> DatabaseResult<B256> {
         self.blocking_mode.run(|| {
-            let (sender, rx) = oneshot_channel();
+            let (sender, mut rx) = unbounded_channel();
             let req = BackendRequest::BlockHash(number, sender);
             self.backend.clone().try_send(req)?;
-            rx.recv()?
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(async move { rx.recv().await })
+                .unwrap_or(Err(DatabaseError::GetBlockHash(
+                    number,
+                    eyre::eyre!("receiver dropped").into(),
+                )))
         })
     }
 
